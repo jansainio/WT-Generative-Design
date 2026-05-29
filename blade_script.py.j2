@@ -1,0 +1,112 @@
+"""
+Auto-generated Fusion 360 script for variant: {{ variant_id }}
+Generated: {{ generated_at }}
+Profile:   {{ profile }}
+Span:      {{ span_mm }} mm
+"""
+import adsk.core, adsk.fusion, math
+
+app    = adsk.core.Application.get()
+ui     = app.userInterface
+design = adsk.fusion.Design.cast(app.activeProduct)
+root   = design.rootComponent
+
+sketches  = root.sketches
+planes    = root.constructionPlanes
+features  = root.features
+
+def offset_plane(base_plane, z_cm):
+    pi = planes.createInput()
+    pi.setByOffset(base_plane, adsk.core.ValueInput.createByReal(z_cm))
+    return planes.add(pi)
+
+def naca0012_points(chord_cm, twist_deg, sweep_cm, n=20):
+    """Return list of (x,y) tuples for a NACA 0012 aerofoil, twisted and swept."""
+    twist = math.radians(twist_deg)
+    t = 0.12  # thickness ratio
+
+    def thickness(xn):
+        return 5 * t * (
+            0.2969 * math.sqrt(xn)
+            - 0.1260 * xn
+            - 0.3516 * xn**2
+            + 0.2843 * xn**3
+            - 0.1015 * xn**4
+        )
+
+    upper, lower = [], []
+    for i in range(n + 1):
+        xn = 0.5 * (1 - math.cos(math.pi * i / n))
+        yt = thickness(xn) * chord_cm
+        xc = xn * chord_cm
+        upper.append((xc,  yt))
+        lower.append((xc, -yt))
+
+    profile = upper + lower[-2::-1]
+    result = []
+    for (px, py) in profile:
+        px -= chord_cm * 0.25          # rotate about quarter-chord
+        rx = px * math.cos(twist) - py * math.sin(twist)
+        ry = px * math.sin(twist) + py * math.cos(twist)
+        rx += sweep_cm + chord_cm * 0.25
+        result.append((rx, ry))
+    return result
+
+# ── Build one sketch per section ──────────────────────────────────────────────
+sections = {{ sections }}   {# list of dicts: z_mm, chord_mm, twist_deg, sweep_mm #}
+sketch_list = []
+
+for sec in sections:
+    z_cm     = sec["z_mm"]     / 10.0
+    chord_cm = sec["chord_mm"] / 10.0
+    sweep_cm = sec["sweep_mm"] / 10.0
+    twist    = sec["twist_deg"]
+
+    pl = offset_plane(root.xYConstructionPlane, z_cm)
+    sk = sketches.add(pl)
+
+    pts_raw = naca0012_points(chord_cm, twist, sweep_cm)
+    pts     = adsk.core.ObjectCollection.create()
+    for (px, py) in pts_raw:
+        pts.add(adsk.core.Point3D.create(px, py, 0))
+
+    spline = sk.sketchCurves.sketchFittedSplines.add(pts)
+    spline.isClosed = True
+    sketch_list.append(sk)
+
+print(f"Created {len(sketch_list)} cross-sections")
+
+# ── Loft through all sections ─────────────────────────────────────────────────
+loftFeatures = features.loftFeatures
+loftInput    = loftFeatures.createInput(
+    adsk.fusion.FeatureOperations.NewBodyFeatureOperation
+)
+
+for sk in sketch_list:
+    for spline in sk.sketchCurves.sketchFittedSplines:
+        loftInput.loftSections.add(spline)
+        break
+
+loftInput.isSolid = True
+loft = loftFeatures.add(loftInput)
+
+if not loft:
+    raise RuntimeError("Loft failed — check section orientations")
+
+body = root.bRepBodies.item(0)
+body.name = "{{ variant_id }}"
+print(f"Body '{body.name}' created successfully")
+
+# ── Export ────────────────────────────────────────────────────────────────────
+export_path = r"{{ export_path }}"
+exportMgr   = design.exportManager
+
+{% if export_format == "STEP" %}
+opts = exportMgr.createSTEPExportOptions(export_path)
+{% else %}
+opts = exportMgr.createSTLExportOptions(body, export_path)
+opts.meshRefinement = adsk.fusion.MeshRefinementSettings.MeshRefinementHigh
+{% endif %}
+
+exportMgr.execute(opts)
+print(f"Exported to: {export_path}")
